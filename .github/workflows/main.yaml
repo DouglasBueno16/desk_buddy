@@ -1,0 +1,76 @@
+name: CI - main.cpp
+
+on:
+  push:
+    paths:
+      - "src/main.cpp"
+
+  pull_request:
+    paths:
+      - "src/main.cpp"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  security-secrets:
+    name: Segurança - API keys / segredos expostos
+    runs-on: ubuntu-latest
+    env:
+      TARGET_FILE: src/main.cpp
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verificar segredos hardcoded em src/main.cpp
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          if [[ ! -f "$TARGET_FILE" ]]; then
+            echo "::error::Arquivo $TARGET_FILE não encontrado"
+            exit 1
+          fi
+
+          # Cada entrada: "descrição|regex (grep -E, case-insensitive)"
+          patterns=(
+            # Macros de segredo redefinidas no código (devem vir só do secrets.ini via build_flags)
+            "Macro de segredo definida no código|#[[:space:]]*define[[:space:]]+(WIFI_SSID|WIFI_PASSWORD|OWM_API_KEY|OWM_LAT|OWM_LON)[[:space:]]"
+            # Variáveis com nome sensível recebendo string literal
+            "Atribuição literal a variável sensível|(api[_-]?key|apikey|app[_-]?id|secret|token|passw(or)?d|pwd|ssid)[a-z0-9_]*[[:space:]]*(\\[[^]]*\\])?[[:space:]]*[=:][[:space:]]*\"[^\"]+\""
+            # Chave colada diretamente na URL (ex.: appid=abc123...)
+            "Chave embutida em URL|[?&](appid|api_?key|key|token|access_token)=[A-Za-z0-9_-]{8,}"
+            # Formato de chave OpenWeatherMap (32 caracteres hexadecimais)
+            "Possível chave OpenWeatherMap (32 hex)|\"[^\"]*\\b[0-9a-f]{32}\\b[^\"]*\""
+            # Formatos conhecidos de provedores
+            "AWS Access Key|AKIA[0-9A-Z]{16}"
+            "Google API Key|AIza[0-9A-Za-z_-]{35}"
+            "GitHub Token|gh[pousr]_[A-Za-z0-9]{36,}"
+            "OpenAI/Stripe secret key|sk[-_](live_|test_)?[A-Za-z0-9]{20,}"
+            "Slack Token|xox[baprs]-[A-Za-z0-9-]{10,}"
+            "Chave privada|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+          )
+
+          found=0
+          for entry in "${patterns[@]}"; do
+            desc="${entry%%|*}"
+            regex="${entry#*|}"
+            while IFS= read -r match; do
+              [[ -z "$match" ]] && continue
+              line="${match%%:*}"
+              echo "::error file=${TARGET_FILE},line=${line}::${desc}"
+              echo "  -> ${TARGET_FILE}:${line} (${desc})"
+              found=1
+            done < <(grep -nEi -- "$regex" "$TARGET_FILE" || true)
+          done
+
+          if [[ $found -ne 0 ]]; then
+            echo ""
+            echo "❌ Possíveis segredos expostos em $TARGET_FILE."
+            echo "   Mova os valores para secrets.ini (não versionado) e use as macros de build_flags."
+            exit 1
+          fi
+
+          echo "✅ Nenhuma API key ou segredo exposto encontrado em $TARGET_FILE."
